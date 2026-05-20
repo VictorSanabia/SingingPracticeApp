@@ -372,17 +372,10 @@ function assignLyricsFromChordPairs(notes, chordPairs, systemBreaks = []) {
     // layout — syllables are positioned under their notes by the engraver.
     const sylMin = sN > 0 ? sortedSyl[0].x : null;
     const sylMax = sN > 0 ? sortedSyl[sN - 1].x : null;
-    const BEATS_PER_MEASURE = 4;
-    const times = noteIdxs.map(j => {
-      const n = notes[j];
-      return (n.measure ?? 0) * BEATS_PER_MEASURE + (n.beat ?? 1);
-    });
-    const tMin = times.length ? times[0] : 0;
-    const tMax = times.length ? times[times.length - 1] : 0;
-    const noteXs = times.map(t => {
+    const noteXs = noteIdxs.map((_, k) => {
       if (sN === 0) return null;
-      if (nN === 1 || sN === 1 || tMax === tMin) return sylMin;
-      return sylMin + ((t - tMin) / (tMax - tMin)) * (sylMax - sylMin);
+      if (nN === 1 || sN === 1) return sylMin;
+      return sylMin + (k / (nN - 1)) * (sylMax - sylMin);
     });
 
     let carriedIn = carryover.length;

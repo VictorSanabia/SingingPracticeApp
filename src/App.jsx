@@ -257,25 +257,15 @@ function assignLyricsFromChordPairs(notes, chordPairs, systemBreaks = []) {
     let carriedOut = 0;
     if ((sN > 0 || carryover.length > 0) && nN > 0) {
       mode = 'claim-then-fill';
-      // Estimate each note's x by mapping its MUSICAL TIME (measure × beats +
-      // beat) into the syllable x range — not its array index. Index-based
-      // mapping assumes notes are spaced evenly in time, but a held quarter
-      // next to two eighths breaks that assumption: short syllables drift
-      // onto the wrong notes and the held note picks up phantom continuations.
-      // (Choosin Texas: "thought - - I" instead of "thought I got" — fixed by
-      // time-proportional mapping.)
+      // Estimate each note's x by mapping its index proportionally into the
+      // syllable x range. (Per-measure clustering was attempted to handle
+      // bar-line x-gaps but it dropped content in songs with carryover
+      // between systems — reverted to single-cluster index map.)
       const sylMin = sN > 0 ? sortedSyl[0].x : 0;
       const sylMax = sN > 0 ? sortedSyl[sN - 1].x : 0;
-      const BEATS_PER_MEASURE = 4;
-      const times = noteIdxs.map(j => {
-        const n = out[j];
-        return (n.measure ?? 0) * BEATS_PER_MEASURE + (n.beat ?? 1);
-      });
-      const tMin = times.length ? times[0] : 0;
-      const tMax = times.length ? times[times.length - 1] : 0;
-      const noteXs = times.map(t => {
-        if (nN === 1 || sN <= 1 || tMax === tMin) return sylMin;
-        return sylMin + ((t - tMin) / (tMax - tMin)) * (sylMax - sylMin);
+      const noteXs = noteIdxs.map((_, k) => {
+        if (nN === 1 || sN <= 1) return sylMin;
+        return sylMin + (k / (nN - 1)) * (sylMax - sylMin);
       });
       // owners[k] holds the syllable OBJECT (not index) so carryover from a
       // different system can be stored alongside this system's syllables.
