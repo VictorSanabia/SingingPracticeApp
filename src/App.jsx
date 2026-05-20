@@ -281,11 +281,10 @@ function assignLyricsFromChordPairs(notes, chordPairs, systemBreaks = []) {
       }
       while (ci < carryover.length) nextCarryover.push(carryover[ci++]);
 
-      // Phase 2 — this system's syllables claim by NEAREST note (not first
-      // note where nx >= syl.x). Short words like "in" (2 letters) sit at
-      // their left-edge x but the notehead they're under is a few pt to the
-      // right — first-note-after-x undershoots and gives that note to the
-      // previous syllable as a hold. Nearest-note-from-cursor solves that.
+      // Phase 2 — claim by NEAREST note from cursor (not first note where
+      // nx ≥ sx). Short words like "in" sit at their left-edge x but the
+      // notehead is a few pt to the right — first-note-after-x undershoots
+      // and gives that note to the previous syllable as a hold instead.
       // Cursor still advances monotonically so syllable order is preserved.
       let s = 0;
       for (; s < sN; s++) {
@@ -377,7 +376,7 @@ const MUSIC_FONT_RE = /[ÏÎïîúùÈèÀáÂâÄäÀ-ÅÈ-ÏÒ-ÖÙ-Ýà-åè-
 // copyright/legal/publisher boilerplate, tempo + dynamic markings, performance
 // directions, navigation tokens (D.S., D.C., to coda), page headers, and
 // instrumental cues. Single source of truth.
-const NON_CONTENT_RE = /copyright|©|\(c\)|all\s*right|reserved|international|unauthorized|reproduction|prohibited|transmission|duplication|hal.?leonard|warner|sony|kobalt|alfred|music sales|cherry lane|publish|copies licensed|p\.\s*\d+\s*of\s*\d+|transcribed|arranged\s*by|engraved|licensed|digital|sheet\s*music|words\s*(and|&)\s*music|music\s*by|lyrics\s*by|words\s*by|from\s*the\s*(musical|movie|film|album)|moderately|slowly|quickly|brightly|allegro|andante|adagio|\brit\.|d\.s\.?\s*al|d\.c\.?\s*al|to\s*coda|\(instr|\(spoken|additional\s*lyric|additonal|see\s+additional|^\s*\(\d+\.\)|\bgently\b|\bwith\s*(feeling|a\s+lilt|spirit|swing|energy)\b|performance\s*note|play\s*\d|=\s*\d+(\s*[-–]\s*\d+)?|^\s*coda\s+[ivx]+\s*$|^\s*=?\s*\d{2,3}\s*[-–]\s*\d{2,3}\s*$/i;
+const NON_CONTENT_RE = /copyright|©|\(c\)|all\s*right|reserved|international|unauthorized|reproduction|prohibited|transmission|duplication|hal.?leonard|warner|sony|kobalt|alfred|music sales|cherry lane|publish|copies licensed|p\.\s*\d+\s*of\s*\d+|transcribed|arranged\s*by|engraved|licensed|digital|sheet\s*music|words\s*(and|&)\s*music|music\s*by|lyrics\s*by|words\s*by|from\s*the\s*(musical|movie|film|album)|moderately|slowly|quickly|brightly|allegro|andante|adagio|\brit\.|d\.s\.?\s*al|d\.c\.?\s*al|to\s*coda|\(instr|\(spoken|additional\s*lyric|additonal|see\s+additional|^\s*\(\d+\.\)|\bgently\b|\bwith\s*(feeling|a\s+lilt|spirit|swing|energy)\b|performance\s*note|play\s*\d|=\s*\d+(\s*[-–]\s*\d+)?|^\s*coda\s+[ivx]+\s*$|^\s*=?\s*\d{2,3}\s*[-–]\s*\d{2,3}\s*$|\bpedal\b|\bcont\.?\s*sim\.?|\b8va\b|2°|¡/i;
 
 // Section labels: "Verse", "Chorus", "Bridge", etc. (optionally followed by a
 // number). Navigation markers, never chord or lyric content.
@@ -388,12 +387,26 @@ const STAFF_PROXIMITY_PT = 80;
 
 // Build a Map<page, ys[]> of staff y-positions, identified by rows that
 // contain at least one music-font glyph.
+// Group music-font glyphs into rows and only count rows with enough glyphs as
+// staves. Chord-diagram blocks (e.g. Hozier's "From Eden") render their
+// vertical strings as 2-3 Ï glyphs in the music font — without this filter
+// those would be mistaken for staves, letting "x o o" muted/open indicator
+// rows below them pass the lyric proximity check.
+const MIN_GLYPHS_PER_STAFF = 5;
 function collectStaffYs(items) {
-  const map = new Map();
+  const rowCounts = new Map();
   for (const it of items) {
     if (!MUSIC_FONT_RE.test(it.s)) continue;
-    if (!map.has(it.page)) map.set(it.page, []);
-    map.get(it.page).push(it.y);
+    const key = `${it.page}-${Math.round(it.y / 5)}`;
+    const r = rowCounts.get(key);
+    if (r) r.count++;
+    else rowCounts.set(key, { page: it.page, y: it.y, count: 1 });
+  }
+  const map = new Map();
+  for (const r of rowCounts.values()) {
+    if (r.count < MIN_GLYPHS_PER_STAFF) continue;
+    if (!map.has(r.page)) map.set(r.page, []);
+    map.get(r.page).push(r.y);
   }
   return map;
 }
@@ -514,7 +527,7 @@ async function extractChordChartFromPdf(file) {
   const buf = await file.arrayBuffer();
   const pdf = await pdfjs.getDocument({ data: buf }).promise;
 
-  const CHORD_RE   = /^[A-G][#b]?(maj7?|min7?|m7?|dim7?|aug|sus[24]?|add\d?|\/[A-G][#b]?|\d+)*$/;
+  const CHORD_RE   = /^([A-G][#b]?(maj7?|min7?|m7?|dim7?|aug|sus[24]?|add\d?|\/[A-G][#b]?|\d+)*|N\.?C\.?)$/;
   // NOISE / SECTION_LABEL / MUSIC_FONT moved to module scope — see top of file.
 
   const allItems = [];
@@ -566,6 +579,8 @@ async function extractChordChartFromPdf(file) {
     for (const x of xs) {
       if (!glyphXs.length || x - glyphXs[glyphXs.length - 1] > 4) glyphXs.push(x);
     }
+    // Filter out chord-diagram "fake staves" — see MIN_GLYPHS_PER_STAFF above.
+    if (glyphXs.length < MIN_GLYPHS_PER_STAFF) continue;
     staffLines.push({ page: row.page, y: row.y, glyphXs });
   }
   // Find the staff line on a given page whose y sits between two PDF rows
@@ -617,6 +632,26 @@ async function extractChordChartFromPdf(file) {
     return [...out, ...beatMarkers].sort((a, b) => a.x - b.x);
   }
 
+  // Some engraving programs emit lyric phrases as single text items with
+  // internal spaces ("She'd take"@95, "er hard to move."@408). Split such
+  // items into per-word sub-items, distributing x by char offset using
+  // the item's width.
+  function splitMultiWord(items) {
+    const out = [];
+    for (const it of items) {
+      if (!/\s/.test(it.s)) { out.push(it); continue; }
+      const text = it.s;
+      const total = text.length;
+      const w = it.w || total * 5;
+      const re = /\S+/g;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        out.push({ ...it, s: m[0], x: it.x + (m.index / total) * w });
+      }
+    }
+    return out;
+  }
+
   const rejects = { music: 0, farFromNotation: 0, noise: 0, credits: 0, title: 0, section: 0, otherType: 0 };
   const sampleSurvivors = [];
   const rowDebug = [];
@@ -639,6 +674,22 @@ async function extractChordChartFromPdf(file) {
     const ncReason = classifyNonContent(joined);
     if (ncReason === 'noise')   { rejects.noise++;   continue; }
     if (ncReason === 'section') { rejects.section++; continue; }
+
+    // Guitar chord-shape diagrams render their muted/open string indicators as
+    // a row of "x" and "o" single-char tokens ("x o o x x o..."). They look
+    // like a lyric row (text, below a staff) but contain no real words. Drop.
+    // Expand multi-word tokens first ("x x" → ["x","x"]) since some PDFs emit
+    // the indicator pairs as single text items.
+    const expanded = row.rawItems
+      .flatMap(i => i.s.split(/\s+/))
+      .map(s => s.trim())
+      .filter(s => s);
+    const xoCount = expanded.filter(s => /^[xo]$/i.test(s)).length;
+    const realWordCount = expanded.filter(s => /^[a-z]{2,}/i.test(s)).length;
+    if (xoCount >= 5 && realWordCount <= 1) {
+      rejects.noise++;
+      continue;
+    }
     // Drop "ALEXIS KESSELMAN, GEORGE MILLER and JOEL CASTILLO" style credit rows.
     // Operate on the joined string — PDFs sometimes return whole credit lines as one token.
     const alphaRuns = joined.match(/[A-Za-z]{2,}/g) || [];
@@ -674,7 +725,8 @@ async function extractChordChartFromPdf(file) {
     else if (hasWords && isBelowStaff)                                             type = 'lyrics';
 
     if (type !== 'other') {
-      rows.push({ page: row.page, y: row.y, type, rawItems: row.rawItems, merged, chordItems });
+      const finalItems = type === 'lyrics' ? splitMultiWord(row.rawItems) : row.rawItems;
+      rows.push({ page: row.page, y: row.y, type, rawItems: finalItems, merged, chordItems });
     } else {
       rejects.otherType++;
       if (sampleSurvivors.length < 8) sampleSurvivors.push({ page: row.page, y: Math.round(row.y), tokens: tokens.slice(0, 12) });
@@ -692,6 +744,35 @@ async function extractChordChartFromPdf(file) {
   }
 
   rows.sort((a, b) => a.page - b.page || b.y - a.y);
+
+  // Multi-stanza dedup: lead sheets sometimes stack verse 1 / verse 2 /
+  // refrain-tag lyric rows directly under one staff (typically 8-12pt apart).
+  // For each lyric row, find the nearest staff above it on the same page;
+  // if any other lyric row sits between that row and the staff, this row is
+  // a secondary stanza and gets dropped. Verse 1 (closest to the staff, the
+  // topmost = largest y) survives.
+  const lyricRows = rows.filter(r => r.type === 'lyrics');
+  const dropLyric = new Set();
+  for (const L of lyricRows) {
+    const staffAbove = staffLines
+      .filter(s => s.page === L.page && s.y > L.y)
+      .reduce((a, b) => !a || b.y < a.y ? b : a, null);
+    if (!staffAbove) continue;
+    for (const M of lyricRows) {
+      if (M === L) continue;
+      if (M.page === L.page && M.y > L.y && M.y < staffAbove.y) {
+        dropLyric.add(L);
+        break;
+      }
+    }
+  }
+  if (dropLyric.size) {
+    console.log(`[chordChart] dropped ${dropLyric.size} secondary-stanza lyric rows`);
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (dropLyric.has(rows[i])) rows.splice(i, 1);
+    }
+  }
+
   const chordDiag = {
     rawItems: allItems.length, rowsTotal: rowMap.size,
     notationPages: [...notationYs.entries()].map(([p, ys]) => `p${p}:${ys.length}`).join(' ') || '(none)',

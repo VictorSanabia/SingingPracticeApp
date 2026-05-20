@@ -9,3 +9,7 @@ __pycache__/
 .DS_Store
 .vs/
 .claude/
+.git.old/
+batch_omr.log
+batch_omr.sh
+diag_*.mjs

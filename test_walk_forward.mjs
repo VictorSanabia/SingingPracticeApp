@@ -19,23 +19,36 @@ const require = createRequire(import.meta.url);
 // Load pdfjs-dist legacy build (Node-compatible)
 const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
 
-const PDF_PATH = 'C:/Users/Victor/Documents/Sheet Muisc/choosin texas.pdf';
-const CACHE_PATH = path.join(__dirname, 'songs_cache', 'choosin texas.pdf.json');
+// CLI: `node test_walk_forward.mjs "Fix You.pdf"` — defaults to choosin texas.
+const PDF_NAME = process.argv[2] || 'choosin texas.pdf';
+const PDF_PATH = `C:/Users/Victor/Documents/Sheet Muisc/${PDF_NAME}`;
+// Cache key matches server.py: re.sub(r'[^\w\-. ]', '_', filename)
+const CACHE_KEY = PDF_NAME.replace(/[^\w\-. ]/g, '_');
+const CACHE_PATH = path.join(__dirname, 'songs_cache', CACHE_KEY + '.json');
 
 // ── Shared regexes & helpers (copied verbatim from App.jsx) ─────────────
 const MUSIC_FONT_RE = /[ÏÎïîúùÈèÀáÂâÄäÀ-ÅÈ-ÏÒ-ÖÙ-Ýà-åè-ïò-öù-ý]/;
-const NON_CONTENT_RE = /copyright|©|\(c\)|all\s*right|reserved|international|unauthorized|reproduction|prohibited|transmission|duplication|hal.?leonard|warner|sony|kobalt|alfred|music sales|cherry lane|publish|copies licensed|p\.\s*\d+\s*of\s*\d+|transcribed|arranged\s*by|engraved|licensed|digital|sheet\s*music|words\s*(and|&)\s*music|music\s*by|lyrics\s*by|words\s*by|from\s*the\s*(musical|movie|film|album)|moderately|slowly|quickly|brightly|allegro|andante|adagio|\brit\.|d\.s\.?\s*al|d\.c\.?\s*al|to\s*coda|\(instr|\(spoken|additional\s*lyric|additonal|see\s+additional|^\s*\(\d+\.\)|\bgently\b|\bwith\s*(feeling|a\s+lilt|spirit|swing|energy)\b|performance\s*note|play\s*\d|=\s*\d+(\s*[-–]\s*\d+)?|^\s*coda\s+[ivx]+\s*$|^\s*=?\s*\d{2,3}\s*[-–]\s*\d{2,3}\s*$/i;
+const NON_CONTENT_RE = /copyright|©|\(c\)|all\s*right|reserved|international|unauthorized|reproduction|prohibited|transmission|duplication|hal.?leonard|warner|sony|kobalt|alfred|music sales|cherry lane|publish|copies licensed|p\.\s*\d+\s*of\s*\d+|transcribed|arranged\s*by|engraved|licensed|digital|sheet\s*music|words\s*(and|&)\s*music|music\s*by|lyrics\s*by|words\s*by|from\s*the\s*(musical|movie|film|album)|moderately|slowly|quickly|brightly|allegro|andante|adagio|\brit\.|d\.s\.?\s*al|d\.c\.?\s*al|to\s*coda|\(instr|\(spoken|additional\s*lyric|additonal|see\s+additional|^\s*\(\d+\.\)|\bgently\b|\bwith\s*(feeling|a\s+lilt|spirit|swing|energy)\b|performance\s*note|play\s*\d|=\s*\d+(\s*[-–]\s*\d+)?|^\s*coda\s+[ivx]+\s*$|^\s*=?\s*\d{2,3}\s*[-–]\s*\d{2,3}\s*$|\bpedal\b|\bcont\.?\s*sim\.?|\b8va\b|2°|¡/i;
 const SECTION_LABEL_RE = /^(verse|chorus|bridge|intro|outro|pre.?chorus|hook|tag|interlude|refrain|coda|vamp|solo|breakdown|ending)(\s*\d+)?$/i;
 const STAFF_PROXIMITY_PT = 80;
 const BPM_MIN = 40;
 const BPM_MAX = 300;
 
+const MIN_GLYPHS_PER_STAFF = 5;
 function collectStaffYs(items) {
-  const map = new Map();
+  const rowCounts = new Map();
   for (const it of items) {
     if (!MUSIC_FONT_RE.test(it.s)) continue;
-    if (!map.has(it.page)) map.set(it.page, []);
-    map.get(it.page).push(it.y);
+    const key = `${it.page}-${Math.round(it.y / 5)}`;
+    const r = rowCounts.get(key);
+    if (r) r.count++;
+    else rowCounts.set(key, { page: it.page, y: it.y, count: 1 });
+  }
+  const map = new Map();
+  for (const r of rowCounts.values()) {
+    if (r.count < MIN_GLYPHS_PER_STAFF) continue;
+    if (!map.has(r.page)) map.set(r.page, []);
+    map.get(r.page).push(r.y);
   }
   return map;
 }
@@ -62,7 +75,7 @@ async function extractChordChartFromPdf(pdfPath) {
   const data = new Uint8Array(await fs.readFile(pdfPath));
   const pdf = await pdfjsLib.getDocument({ data }).promise;
 
-  const CHORD_RE = /^[A-G][#b]?(maj7?|min7?|m7?|dim7?|aug|sus[24]?|add\d?|\/[A-G][#b]?|\d+)*$/;
+  const CHORD_RE = /^([A-G][#b]?(maj7?|min7?|m7?|dim7?|aug|sus[24]?|add\d?|\/[A-G][#b]?|\d+)*|N\.?C\.?)$/;
 
   const allItems = [];
   for (let p = 1; p <= pdf.numPages; p++) {
@@ -102,6 +115,7 @@ async function extractChordChartFromPdf(pdfPath) {
     for (const x of xs) {
       if (!glyphXs.length || x - glyphXs[glyphXs.length - 1] > 4) glyphXs.push(x);
     }
+    if (glyphXs.length < MIN_GLYPHS_PER_STAFF) continue;
     staffLines.push({ page: row.page, y: row.y, glyphXs });
   }
 
@@ -146,6 +160,22 @@ async function extractChordChartFromPdf(pdfPath) {
     return [...out, ...beatMarkers].sort((a, b) => a.x - b.x);
   }
 
+  function splitMultiWord(items) {
+    const out = [];
+    for (const it of items) {
+      if (!/\s/.test(it.s)) { out.push(it); continue; }
+      const text = it.s;
+      const total = text.length;
+      const w = it.w || total * 5;
+      const re = /\S+/g;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        out.push({ ...it, s: m[0], x: it.x + (m.index / total) * w });
+      }
+    }
+    return out;
+  }
+
   const rows = [];
   for (const row of rowMap.values()) {
     row.rawItems.sort((a, b) => a.x - b.x);
@@ -158,6 +188,15 @@ async function extractChordChartFromPdf(pdfPath) {
     if (bigItems.length && bigItems.length === row.rawItems.length) continue;
     const joined = row.rawItems.map(i => i.s).join(' ');
     if (classifyNonContent(joined)) continue;
+
+    // Guitar chord-shape diagram filter
+    const expanded = row.rawItems
+      .flatMap(i => i.s.split(/\s+/))
+      .map(s => s.trim())
+      .filter(s => s);
+    const xoCount = expanded.filter(s => /^[xo]$/i.test(s)).length;
+    const realWordCount = expanded.filter(s => /^[a-z]{2,}/i.test(s)).length;
+    if (xoCount >= 5 && realWordCount <= 1) continue;
     const alphaRuns = joined.match(/[A-Za-z]{2,}/g) || [];
     const upperRuns = alphaRuns.filter(s => /^[A-Z]{3,}$/.test(s));
     if (alphaRuns.length >= 2 && upperRuns.length >= Math.ceil(alphaRuns.length * 0.5)) continue;
@@ -184,11 +223,35 @@ async function extractChordChartFromPdf(pdfPath) {
     else if (hasWords && isBelowStaff) type = 'lyrics';
 
     if (type !== 'other') {
-      rows.push({ page: row.page, y: row.y, type, rawItems: row.rawItems, merged, chordItems });
+      const finalItems = type === 'lyrics' ? splitMultiWord(row.rawItems) : row.rawItems;
+      rows.push({ page: row.page, y: row.y, type, rawItems: finalItems, merged, chordItems });
     }
   }
 
   rows.sort((a, b) => a.page - b.page || b.y - a.y);
+
+  // Multi-stanza dedup
+  const lyricRows = rows.filter(r => r.type === 'lyrics');
+  const dropLyric = new Set();
+  for (const L of lyricRows) {
+    const staffAbove = staffLines
+      .filter(s => s.page === L.page && s.y > L.y)
+      .reduce((a, b) => !a || b.y < a.y ? b : a, null);
+    if (!staffAbove) continue;
+    for (const M of lyricRows) {
+      if (M === L) continue;
+      if (M.page === L.page && M.y > L.y && M.y < staffAbove.y) {
+        dropLyric.add(L);
+        break;
+      }
+    }
+  }
+  if (dropLyric.size) {
+    console.log(`[chordChart] dropped ${dropLyric.size} secondary-stanza lyric rows`);
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (dropLyric.has(rows[i])) rows.splice(i, 1);
+    }
+  }
 
   const result = [];
   let pendingChord = null;
@@ -333,13 +396,21 @@ function assignLyricsFromChordPairs(notes, chordPairs, systemBreaks = []) {
       }
       while (ci < carryover.length) nextCarryover.push(carryover[ci++]);
 
-      // Phase 2 — this system's syllables claim by x with monotonic cursor.
+      // Phase 2 — claim by nearest note from cursor (short words like "in"
+      // sit at their left edge but their notehead is a few pt to the right).
       let s = 0;
       for (; s < sN; s++) {
         const sx = sortedSyl[s].x;
-        while (cursor < nN && noteXs[cursor] < sx) cursor++;
-        if (cursor >= nN) break;
-        owners[cursor++] = sortedSyl[s];
+        let bestK = -1;
+        let bestD = Infinity;
+        for (let k = cursor; k < nN; k++) {
+          const d = Math.abs(noteXs[k] - sx);
+          if (d < bestD) { bestD = d; bestK = k; }
+          else if (bestK >= 0) break;
+        }
+        if (bestK < 0) break;
+        owners[bestK] = sortedSyl[s];
+        cursor = bestK + 1;
       }
       for (let r = s; r < sN; r++) nextCarryover.push(sortedSyl[r]);
 
@@ -386,18 +457,25 @@ function assignLyricsFromChordPairs(notes, chordPairs, systemBreaks = []) {
 
 // ── Main ────────────────────────────────────────────────────────────────
 async function main() {
+  console.log(`\n############################################################`);
+  console.log(`# ${PDF_NAME}`);
+  console.log(`############################################################`);
   console.log('--- Loading cached OMR data ---');
-  const cache = JSON.parse(await fs.readFile(CACHE_PATH, 'utf-8'));
+  // Some old caches contain bare NaN (invalid JSON) — coerce to null on read.
+  const raw = await fs.readFile(CACHE_PATH, 'utf-8');
+  const cache = JSON.parse(raw.replace(/\bNaN\b/g, 'null'));
   console.log(`Notes: ${cache.notes.length}, systemBreaks: [${cache.systemBreaks.join(',')}]`);
 
   console.log('\n--- Running chord-chart extraction ---');
   const pairs = await extractChordChartFromPdf(PDF_PATH);
   const pairType = pairs.filter(p => p.type === 'pair');
-  console.log(`Total entries: ${pairs.length}, type=pair: ${pairType.length}`);
+  const lyricsOnly = pairs.filter(p => p.type === 'lyrics-only');
+  console.log(`Total entries: ${pairs.length}, pair: ${pairType.length}, lyrics-only: ${lyricsOnly.length}`);
 
-  console.log('\n=== ALL entries (pair + lyrics-only + chords-only) ===');
+  console.log('\n=== Raw lyric/pair entries ===');
   for (let i = 0; i < pairs.length; i++) {
     const e = pairs[i];
+    if (e.type === 'chords-only') continue;
     const row = e.lyricRow || e.row;
     const raw = row?.rawItems
       ? [...row.rawItems].sort((a, b) => a.x - b.x).map(it => it.s).join(' ')
@@ -405,28 +483,19 @@ async function main() {
     console.log(`  ${String(i).padStart(2)} ${e.type.padEnd(13)} p${row?.page} y${Math.round(row?.y || 0)}  ${raw}`);
   }
 
-  console.log('\n--- Running walk-forward lyric assignment ---');
+  console.log('\n--- Running lyric assignment ---');
   const { notes, diag } = assignLyricsFromChordPairs(cache.notes, pairs, cache.systemBreaks);
 
-  console.log('\n=== DIAG ===');
   console.log(`pairCount: ${diag.pairCount}, systemCount: ${diag.systemCount}, breakOffset: ${diag.breakOffset}`);
-
-  // Focus on system 0 — that's where "Just" should land on Db5
-  const sys0 = diag.systems[0];
-  console.log('\n=== SYSTEM 0 (should map "Just" → m.6 Db5) ===');
-  console.log(`startMeasure: ${sys0.startMeasure}, end: ${sys0.end}, explicit: ${sys0.explicit}`);
-  console.log(`mode: ${sys0.mode}, syl/glyph/note: ${sys0.sylCount}/${sys0.glyphCount}/${sys0.noteCount}`);
-  console.log(`assigned: ${sys0.assigned}, continuations: ${sys0.continuations}`);
-  console.log(`\nsortedSyllables (s, x):`);
-  for (const { s, x } of sys0.sortedSyllables) console.log(`  ${x.toString().padStart(5)} → ${JSON.stringify(s)}`);
-  console.log(`\nglyphXs: [${sys0.glyphXs.join(', ')}]`);
-  console.log(`\nnoteXs (first 14, estimated): [${sys0.noteXsFirst.join(', ')}]`);
-  console.log(`\nassignedLyrics (first 14):`);
-  for (const { measure, note, lyric } of sys0.assignedLyrics) {
-    console.log(`  m.${measure} ${note.padEnd(4)} → ${JSON.stringify(lyric)}`);
+  if (!diag.systems) {
+    console.log(`\n(no systems — reason: ${diag.reason})`);
+    console.log(`\n=== Cache MusicXML lyrics (fallback view, first 40) ===`);
+    for (const n of cache.notes.slice(0, 40)) {
+      console.log(`  m.${n.measure} ${(n.note || '').padEnd(4)} → ${JSON.stringify(n.lyric || '')}`);
+    }
+    return;
   }
 
-  // Show all sung notes grouped by system for review
   console.log(`\n=== Sung notes by system ===`);
   for (const sys of diag.systems) {
     const sysNotes = notes.filter(n => n.measure != null && n.measure >= sys.startMeasure && n.measure < sys.end && n.lyric);
@@ -434,10 +503,11 @@ async function main() {
     console.log(`  pair ${sys.pairIdx} m.${sys.startMeasure}-${sys.end - 1}  syl=${sys.sylCount} note=${sys.noteCount}  ${txt}`);
   }
 
-  // Show full sequence of first 40 sung notes (note-level detail)
-  const sung = notes.filter(n => n.lyric).slice(0, 40);
-  console.log(`\n=== First 40 sung notes ===`);
-  for (const n of sung) console.log(`  m.${n.measure} ${n.note.padEnd(4)} → ${JSON.stringify(n.lyric)}`);
+  // Full reconstructed lyric string (in note-sequence order)
+  const sung = notes.filter(n => n.lyric);
+  const flat = sung.map(n => n.lyric).filter(l => l !== '-').join(' ');
+  console.log(`\n=== Reconstructed lyric (note-order, hold-markers dropped) ===`);
+  console.log(flat);
 }
 
 main().catch(e => { console.error(e); process.exit(1); });
