@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.vite/
+debug.log
+songs_cache/
+*.musicxml
+__pycache__/
+*.pyc
+.DS_Store
+.vs/
+.claude/
