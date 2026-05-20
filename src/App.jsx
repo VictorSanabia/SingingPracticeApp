@@ -43,7 +43,11 @@ function shiftNote(name, semitones) {
   const shifted = midi + semitones;
   const idx = ((shifted % 12) + 12) % 12;
   const oct = Math.floor(shifted / 12) - 1;
-  return CHROMATIC[idx] + oct;
+  // Preserve the input's accidental convention. If the OMR named the note
+  // with a flat (Eb, Bb, Ab…), shifted black-key notes also use flats so a
+  // flat-key song stays consistent across octaves. Otherwise default sharps.
+  const useFlats = /^[A-G]b/.test(name.trim());
+  return (useFlats ? FLAT_NAMES : CHROMATIC)[idx] + oct;
 }
 
 function centsToStatus(c) {
