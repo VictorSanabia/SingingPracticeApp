@@ -257,15 +257,25 @@ function assignLyricsFromChordPairs(notes, chordPairs, systemBreaks = []) {
     let carriedOut = 0;
     if ((sN > 0 || carryover.length > 0) && nN > 0) {
       mode = 'claim-then-fill';
-      // Estimate each note's x by proportionally mapping its index into the
-      // syllable x range. Syllable layout reflects notehead layout (the
-      // engraver positioned syllables under their notes). The glyph-x range
-      // would have been ideal but glyph detection misses leading noteheads.
+      // Estimate each note's x by mapping its MUSICAL TIME (measure × beats +
+      // beat) into the syllable x range — not its array index. Index-based
+      // mapping assumes notes are spaced evenly in time, but a held quarter
+      // next to two eighths breaks that assumption: short syllables drift
+      // onto the wrong notes and the held note picks up phantom continuations.
+      // (Choosin Texas: "thought - - I" instead of "thought I got" — fixed by
+      // time-proportional mapping.)
       const sylMin = sN > 0 ? sortedSyl[0].x : 0;
       const sylMax = sN > 0 ? sortedSyl[sN - 1].x : 0;
-      const noteXs = noteIdxs.map((_, k) => {
-        if (nN === 1 || sN <= 1) return sylMin;
-        return sylMin + (k / (nN - 1)) * (sylMax - sylMin);
+      const BEATS_PER_MEASURE = 4;
+      const times = noteIdxs.map(j => {
+        const n = out[j];
+        return (n.measure ?? 0) * BEATS_PER_MEASURE + (n.beat ?? 1);
+      });
+      const tMin = times.length ? times[0] : 0;
+      const tMax = times.length ? times[times.length - 1] : 0;
+      const noteXs = times.map(t => {
+        if (nN === 1 || sN <= 1 || tMax === tMin) return sylMin;
+        return sylMin + ((t - tMin) / (tMax - tMin)) * (sylMax - sylMin);
       });
       // owners[k] holds the syllable OBJECT (not index) so carryover from a
       // different system can be stored alongside this system's syllables.
@@ -2142,6 +2152,25 @@ function durLabel(beats) {
   return best.label;
 }
 
+// Pick the best string + fret for a MIDI note, preferring candidates whose
+// fret is at or above the neck position (and closest to it). Exported so the
+// fretboard can highlight the SAME string/fret the tab shows.
+function pickStringFret(midi, neckPos) {
+  if (midi == null) return null;
+  const cands = [];
+  for (let s = 0; s < GUITAR_OPEN_MIDI.length; s++) {
+    const fret = midi - GUITAR_OPEN_MIDI[s];
+    if (fret >= 0 && fret <= 22) cands.push({ s, fret });
+  }
+  if (!cands.length) return null;
+  cands.sort((a, b) => {
+    const da = a.fret < neckPos ? (neckPos - a.fret) + 24 : (a.fret - neckPos);
+    const db = b.fret < neckPos ? (neckPos - b.fret) + 24 : (b.fret - neckPos);
+    return da - db;
+  });
+  return cands[0];
+}
+
 function TabStaff({ items, idx, neckPos }) {
   const [svgRef, { w }] = useSize();
   const VISIBLE = 8;
@@ -2159,23 +2188,17 @@ function TabStaff({ items, idx, neckPos }) {
   const colXs = [];
   { let cum = PADL; for (const cw of colWs) { colXs.push(cum); cum += cw; } }
 
-  const pickPos = (midi) => {
-    if (midi == null) return null;
-    const cands = [];
-    for (let s = 0; s < nStr; s++) {
-      const fret = midi - GUITAR_OPEN_MIDI[s];
-      if (fret >= 0 && fret <= 22) cands.push({ s, fret });
-    }
-    if (!cands.length) return null;
-    cands.sort((a, b) => {
-      const da = a.fret < neckPos ? (neckPos - a.fret) + 24 : (a.fret - neckPos);
-      const db = b.fret < neckPos ? (neckPos - b.fret) + 24 : (b.fret - neckPos);
-      return da - db;
-    });
-    return cands[0];
-  };
+  // Mirror the fretboard's auto-position so the tab and the fretboard agree
+  // on which fret each note lands at. When the user explicitly moves the
+  // neck (neckPos > 0) that overrides the auto choice.
+  const { root: keyRoot, mode: keyMode } = detectKey(items);
+  const scaleIvs = keyMode === 'major' ? SCALE_MAJOR : PENTA_MINOR;
+  const scalePCs = new Set(scaleIvs.map(iv => (keyRoot + iv) % 12));
+  const upcoming = items.slice(idx, idx + 16);
+  const autoPos = bestNeckPos(upcoming.length ? upcoming : items, scalePCs);
+  const effectivePos = (neckPos === 0 && autoPos > 0) ? autoPos : neckPos;
 
-  const positions = slice.map(it => pickPos(noteToMidi(it.note)));
+  const positions = slice.map(it => pickStringFret(noteToMidi(it.note), effectivePos));
 
   return (
     <div style={{ flexShrink: 0, background: '#0d0d0d', borderRadius: 6, padding: '6px 0' }}>
@@ -2267,8 +2290,6 @@ function TabStaff({ items, idx, neckPos }) {
 
 function GuitarFretboard({ items, idx, neckPos, onNeckPos }) {
   const [svgRef, { w, h }] = useSize();
-  const curMeasure = items[idx]?.measure;
-  const curPC = (() => { const m = noteToMidi(items[idx]?.note); return m != null ? ((m % 12) + 12) % 12 : null; })();
   const NUM_FRETS = 5;
 
   const { root: keyRoot, mode: keyMode } = detectKey(items);
@@ -2276,18 +2297,18 @@ function GuitarFretboard({ items, idx, neckPos, onNeckPos }) {
   const scaleIvs = keyMode === 'major' ? SCALE_MAJOR : PENTA_MINOR;
   const scalePCs = new Set(scaleIvs.map(iv => (keyRoot + iv) % 12));
 
-  const activePCs = new Set(
-    (curMeasure
-      ? items.filter(n => n.measure >= curMeasure && n.measure < curMeasure + 2)
-      : items.slice(idx, idx + 8)
-    ).map(n => noteToMidi(n.note)).filter(Boolean).map(m => ((m % 12) + 12) % 12)
-  );
-
   // Auto-position: pick the box that covers the upcoming ~16 notes weighted
   // by frequency. As idx advances, the box re-targets the next phrase.
   const upcoming = items.slice(idx, idx + 16);
   const autoPos = bestNeckPos(upcoming.length ? upcoming : items, scalePCs);
   const effectivePos = (neckPos === 0 && autoPos > 0) ? autoPos : neckPos;
+
+  // Specific string+fret for the current and next note — same picker the tab
+  // uses, so the highlight on the fretboard matches the fret number in the tab.
+  const curPos = pickStringFret(noteToMidi(items[idx]?.note), effectivePos);
+  const nextPos = items[idx + 1]
+    ? pickStringFret(noteToMidi(items[idx + 1].note), effectivePos)
+    : null;
 
   const PL = 32, PR = 10, PT = 20, PB = 16;
   const drawW = Math.max((w || 0) - PL - PR, 1);
@@ -2309,9 +2330,9 @@ function GuitarFretboard({ items, idx, neckPos, onNeckPos }) {
         const cx = isOpen ? PL - 14 : PL + (f - effectivePos - 0.5) * fretSp;
         const cy = PT + s * strSp;
         const isRoot = pc === keyRoot;
-        const isActive = activePCs.has(pc);
-        const isCur = pc === curPC;
-        dots.push({ cx, cy, pc, isRoot, isActive, isCur, noteName: pcName(pc, useFlatsForKey) });
+        const isCur = curPos && curPos.s === s && curPos.fret === f;
+        const isNext = !isCur && nextPos && nextPos.s === s && nextPos.fret === f;
+        dots.push({ cx, cy, pc, isRoot, isCur, isNext, noteName: pcName(pc, useFlatsForKey) });
       }
     }
   }
@@ -2368,10 +2389,10 @@ function GuitarFretboard({ items, idx, neckPos, onNeckPos }) {
                 );
               })}
               {dots.map((d, i) => {
-                const fill = d.isCur ? '#ffb347' : '#1a1a1a';
-                const stroke = d.isCur ? '#ff9800' : d.isRoot ? '#555' : '#2a2a2a';
-                const textFill = d.isCur ? '#000' : '#555';
-                const sw = d.isRoot && !d.isCur ? 1.5 : 2;
+                const fill = d.isCur ? '#ffb347' : d.isNext ? '#3a2a14' : '#1a1a1a';
+                const stroke = d.isCur ? '#ff9800' : d.isNext ? '#8a6a30' : d.isRoot ? '#555' : '#2a2a2a';
+                const textFill = d.isCur ? '#000' : d.isNext ? '#d4a050' : '#555';
+                const sw = (d.isRoot && !d.isCur) ? 1.5 : 2;
                 return (
                   <g key={i}>
                     <circle cx={d.cx} cy={d.cy} r={dotR} fill={fill} stroke={stroke} strokeWidth={sw} />
