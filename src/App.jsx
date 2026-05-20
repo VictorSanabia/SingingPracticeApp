@@ -281,13 +281,25 @@ function assignLyricsFromChordPairs(notes, chordPairs, systemBreaks = []) {
       }
       while (ci < carryover.length) nextCarryover.push(carryover[ci++]);
 
-      // Phase 2 — this system's syllables claim by x with monotonic cursor.
+      // Phase 2 — this system's syllables claim by NEAREST note (not first
+      // note where nx >= syl.x). Short words like "in" (2 letters) sit at
+      // their left-edge x but the notehead they're under is a few pt to the
+      // right — first-note-after-x undershoots and gives that note to the
+      // previous syllable as a hold. Nearest-note-from-cursor solves that.
+      // Cursor still advances monotonically so syllable order is preserved.
       let s = 0;
       for (; s < sN; s++) {
         const sx = sortedSyl[s].x;
-        while (cursor < nN && noteXs[cursor] < sx) cursor++;
-        if (cursor >= nN) break;
-        owners[cursor++] = sortedSyl[s];
+        let bestK = -1;
+        let bestD = Infinity;
+        for (let k = cursor; k < nN; k++) {
+          const d = Math.abs(noteXs[k] - sx);
+          if (d < bestD) { bestD = d; bestK = k; }
+          else if (bestK >= 0) break;  // noteXs monotonic; distance climbing
+        }
+        if (bestK < 0) break;
+        owners[bestK] = sortedSyl[s];
+        cursor = bestK + 1;
       }
       for (let r = s; r < sN; r++) nextCarryover.push(sortedSyl[r]);
 
