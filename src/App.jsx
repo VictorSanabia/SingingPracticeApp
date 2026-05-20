@@ -1887,15 +1887,44 @@ function detectKey(items) {
   return { root: bestRoot, mode: bestMode };
 }
 
-function bestNeckPos(scalePCs) {
-  if (!scalePCs.size) return 0;
+// Pick the neck position whose 5-fret window (index finger + pinky stretch)
+// covers the most actually-played notes, weighted by frequency. Convention
+// matches GuitarFretboard rendering: pos returned is "fret before index" so
+// pos=8 means "Fret 9" with visible window [9, 13]. A note counts if ANY of
+// its string/fret candidates falls in the window. Falls back to scale-density
+// scoring when no song data is available.
+function bestNeckPos(items, scalePCs) {
+  const freq = new Map();
+  const cands = new Map();
+  if (items && items.length) {
+    for (const n of items) {
+      const m = noteToMidi(n.note);
+      if (m == null) continue;
+      freq.set(m, (freq.get(m) || 0) + 1);
+      if (!cands.has(m)) {
+        const list = [];
+        for (let s = 0; s < GUITAR_OPEN_MIDI.length; s++) {
+          const f = m - GUITAR_OPEN_MIDI[s];
+          if (f >= 0 && f <= 22) list.push(f);
+        }
+        cands.set(m, list);
+      }
+    }
+  }
   let bestPos = 0, bestScore = -1;
-  for (let pos = 0; pos <= 12; pos++) {
+  for (let pos = 0; pos <= 17; pos++) {
+    const lo = pos === 0 ? 0 : pos + 1;
+    const hi = pos + 5;
     let score = 0;
-    for (let s = 0; s < GUITAR_OPEN_MIDI.length; s++) {
-      const minF = pos === 0 ? 0 : pos + 1;
-      for (let f = minF; f <= pos + 5; f++) {
-        if (scalePCs.has(((GUITAR_OPEN_MIDI[s] + f) % 12 + 12) % 12)) score++;
+    if (freq.size) {
+      for (const [m, fs] of cands) {
+        if (fs.some(f => f >= lo && f <= hi)) score += freq.get(m);
+      }
+    } else if (scalePCs) {
+      for (let s = 0; s < GUITAR_OPEN_MIDI.length; s++) {
+        for (let f = lo; f <= hi; f++) {
+          if (scalePCs.has(((GUITAR_OPEN_MIDI[s] + f) % 12 + 12) % 12)) score++;
+        }
       }
     }
     if (score > bestScore) { bestScore = score; bestPos = pos; }
@@ -2254,7 +2283,10 @@ function GuitarFretboard({ items, idx, neckPos, onNeckPos }) {
     ).map(n => noteToMidi(n.note)).filter(Boolean).map(m => ((m % 12) + 12) % 12)
   );
 
-  const autoPos = bestNeckPos(scalePCs);
+  // Auto-position: pick the box that covers the upcoming ~16 notes weighted
+  // by frequency. As idx advances, the box re-targets the next phrase.
+  const upcoming = items.slice(idx, idx + 16);
+  const autoPos = bestNeckPos(upcoming.length ? upcoming : items, scalePCs);
   const effectivePos = (neckPos === 0 && autoPos > 0) ? autoPos : neckPos;
 
   const PL = 32, PR = 10, PT = 20, PB = 16;
